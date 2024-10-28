@@ -1,0 +1,6 @@
+# Generated from CLion C/C++ Code Style settings
+BasedOnStyle: Google
+ColumnLimit: 80
+DerivePointerAlignment: false 
+PointerAlignment: Left
+IndentWidth: 2
