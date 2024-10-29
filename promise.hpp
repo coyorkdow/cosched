@@ -49,6 +49,8 @@ class task_base;
 
 template <class Tp>
 struct promise_base : std::promise<Tp> {
+  task<Tp> get_return_object() noexcept;
+
   std::suspend_always initial_suspend() const noexcept { return {}; }
   std::suspend_always final_suspend() const noexcept { return {}; }
 
@@ -74,8 +76,6 @@ template <class Tp>
   requires(!std::is_reference_v<Tp>)
 class promise : public details_::promise_base<Tp> {
  public:
-  task<Tp> get_return_object() noexcept;
-
   void return_value(const Tp& value) noexcept(
       std::is_nothrow_copy_constructible_v<Tp>) {
     this->set_value(value);
@@ -96,8 +96,6 @@ class promise : public details_::promise_base<Tp> {
 template <>
 class promise<void> : public details_::promise_base<void> {
  public:
-  inline task<void> get_return_object() noexcept;
-
   void return_void() noexcept { this->set_value(); }
 
  private:
@@ -187,8 +185,7 @@ class task : public details_::task_base<Tp> {
       : details_::task_base<Tp>(h, t) {}
 
   template <class Rp>
-    requires(!std::is_reference_v<Rp>)
-  friend class promise;
+  friend struct details_::promise_base;
 
   template <class Rp>
   friend task<Rp> make_async_task(task<Rp>&) noexcept;
@@ -213,8 +210,7 @@ class task<void> : public details_::task_base<void> {
       : details_::task_base<void>(h, t) {}
 
   template <class Rp>
-    requires(!std::is_reference_v<Rp>)
-  friend class promise;
+  friend struct details_::promise_base;
 
   template <class Rp>
   friend task<Rp> make_async_task(task<Rp>&) noexcept;
@@ -227,15 +223,10 @@ task<Tp> make_async_task(task<Tp>& t) noexcept {
 }
 
 template <class Tp>
-  requires(!std::is_reference_v<Tp>)
-task<Tp> promise<Tp>::get_return_object() noexcept {
-  return task<Tp>(std::coroutine_handle<promise>::from_promise(*this),
+task<Tp> details_::promise_base<Tp>::get_return_object() noexcept {
+  return task<Tp>(std::coroutine_handle<promise<Tp>>::from_promise(
+                      static_cast<promise<Tp>&>(*this)),
                   task_type::deferred);
-}
-
-inline task<void> promise<void>::get_return_object() noexcept {
-  return task<void>(std::coroutine_handle<promise>::from_promise(*this),
-                    task_type::deferred);
 }
 
 template <class Tp>
