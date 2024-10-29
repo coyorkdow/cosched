@@ -56,7 +56,8 @@ add_executable(my_project_test
     ${CMAKE_CURRENT_SOURCE_DIR}/test.cc
 )
 
-target_compile_options(my_project_test PUBLIC -g -Wall -fsanitize=address)
+target_compile_options(my_project_test PUBLIC -g -Wall)
+target_compile_options(my_project_test PUBLIC -fsanitize=address)
 target_link_options(my_project_test PUBLIC -fsanitize=address)
 
 target_link_libraries(my_project_test PRIVATE
