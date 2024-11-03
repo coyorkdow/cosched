@@ -10,7 +10,7 @@
 #include <set>
 #include <thread>
 
-#include "promise.hpp"
+#include "cosched.hpp"
 
 std::set<uint64_t> tids;
 std::mutex tid_mu;
