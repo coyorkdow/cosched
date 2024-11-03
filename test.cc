@@ -45,7 +45,7 @@ coro::task<int> slow_response(int a, int b) {
   };
   coro::task<int> resp1 = co_await coro::this_scheduler::parallel(request(a));
   coro::task<int> resp2 = co_await coro::this_scheduler::parallel(request(b));
-  // std::this_thread::sleep_for(1s);
+  std::this_thread::sleep_for(1s);
   co_return co_await std::move(resp1) + co_await std::move(resp2);
 }
 

@@ -32,6 +32,7 @@ int main() {
 With a scheduler we can run multiple coroutines simultaneously.
 The following snippet shows a task receives the results from two delayed subtasks.
 Each subtask will spend 1 second to return. And the main task have to wait until both subtasks return their results.
+The main task also spend 1 second to do its own stuff which is independent to the subtasks.
 By scheduling this task with a scheduler that has three worker threads, we can get the final result in one second.
 Because we can have two subtasks run in parallel.
 ```c++
@@ -43,6 +44,7 @@ coro::task<int> slow_response(int a, int b) {
   };
   coro::task<int> resp1 = co_await coro::this_scheduler::parallel(request(a));
   coro::task<int> resp2 = co_await coro::this_scheduler::parallel(request(b));
+  std::this_thread::sleep_for(1s);
   co_return co_await std::move(resp1) + co_await std::move(resp2);
 }
 
