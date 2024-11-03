@@ -1,5 +1,7 @@
 
+#include <chrono>
 #include <iostream>
+#include <ostream>
 #include <thread>
 #include <type_traits>
 
@@ -21,6 +23,18 @@ coro::task<int> fibonacci(int n) {
 coro::task<std::string> foo(std::string v) {
   std::cout << v << '\n';
   co_return v;
+}
+
+coro::task<int> slow_response(int a, int b) {
+  using namespace std::chrono_literals;
+  auto request = [](int v) -> coro::task<int> {
+    std::this_thread::sleep_for(1s);
+    co_return v;
+  };
+  coro::task<int> resp1 = co_await coro::this_scheduler::parallel(request(a));
+  coro::task<int> resp2 = co_await coro::this_scheduler::parallel(request(b));
+  std::this_thread::sleep_for(1s);
+  co_return co_await std::move(resp1) + co_await std::move(resp2);
 }
 
 int main() {
@@ -51,4 +65,10 @@ int main() {
 
   coro::static_thread_pool pool(3);
   std::cout << pool.schedule(fibonacci(10)).get() << std::endl;
+
+  auto start = std::chrono::steady_clock::now();
+  std::cout << pool.schedule(slow_response(1, 2)).get() << std::endl;
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  std::cout << "elapsed time: " << elapsed << '\n';
 }
