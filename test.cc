@@ -91,6 +91,6 @@ TEST(StaticThreadPoolTest, Parallel) {
   EXPECT_EQ(3, pool.schedule(slow_response(1, 2)).get());
   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start);
-  std::cout << "elapsed time: " << elapsed << '\n';
+  std::cout << "elapsed time: " << elapsed.count() << "ms\n";
   EXPECT_LE(elapsed.count(), 1100);
 }
