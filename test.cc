@@ -1,14 +1,26 @@
 
+#include <asm-generic/errno.h>
+#include <gtest/gtest.h>
+#include <sys/types.h>
+
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <ostream>
+#include <set>
 #include <thread>
-#include <type_traits>
 
 #include "promise.hpp"
 
+std::set<uint64_t> tids;
+std::mutex tid_mu;
+
 coro::task<void> print_tid() {
   std::cout << "thread id is " << std::this_thread::get_id() << '\n';
+  {
+    std::unique_lock l(tid_mu);
+    tids.insert(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  }
   co_return;
 }
 
@@ -20,7 +32,7 @@ coro::task<int> fibonacci(int n) {
   co_return co_await fibonacci(n - 1) + co_await fibonacci(n - 2);
 }
 
-coro::task<std::string> foo(std::string v) {
+coro::task<std::string> echo(std::string v) {
   std::cout << v << '\n';
   co_return v;
 }
@@ -37,12 +49,14 @@ coro::task<int> slow_response(int a, int b) {
   co_return co_await std::move(resp1) + co_await std::move(resp2);
 }
 
-int main() {
-  auto fib = fibonacci(1);
+TEST(CoroRunTest, Fib) {
+  auto fib = fibonacci(5);
   fib.wait();
-  std::cout << fib.get() << '\n';
+  EXPECT_EQ(5, fib.get());
+}
 
-  auto f = foo("abc");
+TEST(CoroRunTest, Async) {
+  auto f = echo("abc");
 
   auto b = [](auto f) -> coro::task<void> {
     using namespace std::chrono_literals;
@@ -56,19 +70,27 @@ int main() {
   }(f.release_coroutine_handle());
 
   std::jthread th([f = std::move(f)]() mutable {
-    std::cout << f.get();
-    std::cout << "\nsub thread exit\n";
+    // std::cout << f.get();
+    EXPECT_EQ("abc", f.get());
+    std::cout << "sub thread exit\n";
   });
 
   b.get();
-  static_assert(!std::is_copy_constructible_v<decltype(f)>);
+}
 
+TEST(StaticThreadPoolTest, Fib) {
   coro::static_thread_pool pool(3);
-  std::cout << pool.schedule(fibonacci(10)).get() << std::endl;
+  tids.clear();
+  EXPECT_EQ(55, pool.schedule(fibonacci(10)).get());
+  EXPECT_EQ(3, tids.size());
+}
 
+TEST(StaticThreadPoolTest, Parallel) {
+  coro::static_thread_pool pool(3);
   auto start = std::chrono::steady_clock::now();
-  std::cout << pool.schedule(slow_response(1, 2)).get() << std::endl;
+  EXPECT_EQ(3, pool.schedule(slow_response(1, 2)).get());
   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start);
   std::cout << "elapsed time: " << elapsed << '\n';
+  EXPECT_LE(elapsed.count(), 1100);
 }

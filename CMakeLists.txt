@@ -29,10 +29,10 @@ if(NOT GTest_FOUND)
     message(FATAL_ERROR "GTest not found")
 endif()
 
-find_package(spdlog REQUIRED)
-if(NOT spdlog_FOUND)
-    message(FATAL_ERROR "spdlog not found")
-endif()
+# find_package(spdlog REQUIRED)
+# if(NOT spdlog_FOUND)
+#     message(FATAL_ERROR "spdlog not found")
+# endif()
 
 # list(APPEND PROJECT_SRCS
 #   cosched.hpp
@@ -52,18 +52,17 @@ endif()
 # )
 
 enable_testing()
-add_executable(my_project_test
+add_executable(cosched_test
     ${CMAKE_CURRENT_SOURCE_DIR}/test.cc
 )
 
-target_compile_options(my_project_test PUBLIC -g -Wall)
-target_compile_options(my_project_test PUBLIC -fsanitize=address)
-target_link_options(my_project_test PUBLIC -fsanitize=address)
+target_compile_options(cosched_test PUBLIC -g -Wall)
+target_compile_options(cosched_test PUBLIC -fsanitize=address)
+target_link_options(cosched_test PUBLIC -fsanitize=address)
 
-target_link_libraries(my_project_test PRIVATE
-    # projectcore
+target_link_libraries(cosched_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
 
-add_test(NAME my_project_test COMMAND my_project_test)
+add_test(NAME cosched_test COMMAND cosched_test)
