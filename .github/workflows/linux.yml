@@ -1,0 +1,33 @@
+name: Linux
+
+on:
+  workflow_dispatch: # for manual workflow trigger
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+
+jobs:
+  linux_cpp20:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt install libgtest-dev
+
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_CXX_STANDARD=20 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Werror" ..
+          cmake --build .
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
