@@ -8,6 +8,7 @@
 #include <mutex>
 #include <ostream>
 #include <set>
+#include <string>
 #include <thread>
 
 #include "cosched.hpp"
@@ -46,6 +47,9 @@ coro::task<int> slow_response(int a, int b) {
   coro::task<int> resp1 = co_await coro::this_scheduler::parallel(request(a));
   coro::task<int> resp2 = co_await coro::this_scheduler::parallel(request(b));
   std::this_thread::sleep_for(1s);
+  auto immediate = co_await coro::this_scheduler::parallel(
+      []() -> coro::task<void> { co_return; }());
+  co_await std::move(immediate);
   co_return co_await std::move(resp1) + co_await std::move(resp2);
 }
 
@@ -93,4 +97,24 @@ TEST(StaticThreadPoolTest, Parallel) {
       std::chrono::steady_clock::now() - start);
   std::cout << "elapsed time: " << elapsed.count() << "ms\n";
   EXPECT_LE(elapsed.count(), 1100);
+}
+
+TEST(StaticThreadPoolTest, Yield) {
+  auto yield_some = [](int n) -> coro::task<std::string> {
+    while (n--) {
+      co_await coro::this_scheduler::yield;
+    }
+    co_return "complete";
+  };
+  EXPECT_EQ("complete", yield_some(10).get());
+  int n = 0;
+  for (auto h = yield_some(10).release_coroutine_handle();
+       !h.done() || (h.destroy(), false); h.resume()) {
+    n++;
+  }
+  EXPECT_EQ(11, n);
+
+  coro::static_thread_pool pool(1);
+  auto task = pool.schedule(yield_some(10));
+  EXPECT_EQ("complete", task.get());
 }

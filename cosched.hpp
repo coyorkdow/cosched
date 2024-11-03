@@ -14,15 +14,25 @@
 
 namespace coro {
 
+class static_thread_pool;
+
 template <class Tp>
 class async_awaiter;
 
 template <class Tp>
 class parallel_awaiter;
 
-struct always_awaiter : std::suspend_always {};
+class always_awaiter : public std::suspend_always {
+ public:
+  always_awaiter() noexcept : scheduler_(nullptr) {}
+  explicit always_awaiter(static_thread_pool* pool) noexcept
+      : scheduler_(pool) {}
 
-class static_thread_pool;
+  inline void await_suspend(std::coroutine_handle<>) const;
+
+ private:
+  static_thread_pool* scheduler_;
+};
 
 template <class Tp>
   requires(!std::is_reference_v<Tp>)
@@ -54,8 +64,6 @@ class promise_base : public std::promise<Tp> {
     std::mutex mu;
     std::coroutine_handle<> wait_coro;
     bool done{false};
-    // Mark this coroutine has been enqueued to the scheduler. Only awaiter will
-    // use it, no need be protected by mutex.
     bool has_scheduled{false};
     bool suspend_on_final{true};
     static_thread_pool* scheduler{nullptr};
@@ -70,7 +78,9 @@ class promise_base : public std::promise<Tp> {
   template <class Awaiter>
   void await_transform(Awaiter) = delete;
 
-  always_awaiter await_transform(always_awaiter) { return always_awaiter{}; }
+  always_awaiter await_transform(always_awaiter) {
+    return always_awaiter{shared_ctx_->scheduler};
+  }
 
   template <class Up>
   inline async_awaiter<Up> await_transform(task<Up>) noexcept;
@@ -101,7 +111,8 @@ class promise : public details_::promise_base<Tp> {
  public:
   template <class Up>
   void return_value(Up&& value)
-    requires(std::is_same_v<Tp, Up> || std::is_same_v<const Tp&, Up>)
+    requires(std::is_same_v<Tp, Up> || std::is_same_v<const Tp&, Up> ||
+             std::is_constructible_v<Tp, Up>)
   {
     this->set_value(std::forward<Up>(value));
   }
@@ -206,6 +217,12 @@ class task_base {
     return h;
   }
 
+  ~task_base() {
+    if (this->typ_ == task_type::deferred && this->fu_.valid()) {
+      get();
+    }
+  }
+
  protected:
   task_base(std::coroutine_handle<promise<Tp>> h = nullptr,
             task_type t = task_type::deferred) noexcept
@@ -295,6 +312,8 @@ class static_thread_pool {
   }
 
  private:
+  friend class always_awaiter;
+
   template <class Tp>
   friend class async_awaiter;
 
@@ -336,6 +355,12 @@ class static_thread_pool {
   std::vector<std::thread> ths_;
   bool exit_;
 };
+
+inline void always_awaiter::await_suspend(std::coroutine_handle<> h) const {
+  if (scheduler_) {
+    scheduler_->schedule(h);
+  }
+}
 
 template <class Tp>
 class async_awaiter : protected coro::task<Tp> {
