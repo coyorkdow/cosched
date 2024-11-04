@@ -2,13 +2,13 @@
 
 A simple c++20 coroutine scheduler with only single header.
 
-Let's start from basic examples.
+Let's start from several examples.
 
-**1. Recursive call**
+## Example: Recursive call
 
 The following snippet shows a recursive coroutine which calculate fibonacci number in a most naive way.
 We can `co_await` a `task<Tp>` object and get its result. If the current coroutine is running in a scheduler,
-`co_await` will lead an asynchronous invocation, the caller coroutine will be suspended until the callee coroutine finish.
+`co_await` will lead an asynchronous invocation and the caller coroutine will be suspended until the callee coroutine is finished.
 However, we can also synchronized a coroutine by `task<Tp>::get`, which allows us call a coroutine from a normal function.
 ```c++
 #include "cosched.hpp"
@@ -27,12 +27,12 @@ int main() {
 }
 ```
 
-**2. Run in parallel**
+## Example: Run in parallel
 
 With a scheduler we can run multiple coroutines simultaneously.
 The following snippet shows a task receives the results from two delayed subtasks.
 Each subtask will spend 1 second to return. And the main task have to wait until both subtasks return their results.
-The main task also spend 1 second to do its own stuff which is independent to the subtasks.
+The main task also spends 1 second to do its own stuff which is independent to the subtasks.
 By scheduling this task with a scheduler that has three worker threads, we can get the final result in one second.
 Because we can have two subtasks run in parallel.
 ```c++
