@@ -1,9 +1,8 @@
-
-#include <asm-generic/errno.h>
 #include <gtest/gtest.h>
-#include <sys/types.h>
 
+#include <atomic>
 #include <chrono>
+#include <coroutine>
 #include <iostream>
 #include <mutex>
 #include <ostream>
@@ -117,4 +116,26 @@ TEST(StaticThreadPoolTest, Yield) {
   coro::static_thread_pool pool(1);
   auto task = pool.schedule(yield_some(10));
   EXPECT_EQ("complete", task.get());
+}
+
+TEST(StaticThreadPoolTest, Latch) {
+  using namespace std::chrono_literals;
+  std::atomic<int> cnt{0};
+  coro::latch l(2);
+  auto count_up = [](std::atomic<int>& cnt, coro::latch& l) -> coro::task<> {
+    co_await l;
+    cnt.fetch_add(1);
+    co_return;
+  };
+
+  coro::static_thread_pool pool(1);
+  pool.schedule(count_up(cnt, l));
+  pool.schedule(count_up(cnt, l));
+  std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(0, cnt.load());
+  l.count_down();
+  EXPECT_EQ(0, cnt.load());
+  l.count_down();
+  std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(2, cnt.load());
 }
