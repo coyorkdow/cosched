@@ -3,12 +3,14 @@
 #include <atomic>
 #include <chrono>
 #include <coroutine>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
 #include <ostream>
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "cosched.hpp"
 
@@ -131,11 +133,62 @@ TEST(StaticThreadPoolTest, Latch) {
   coro::static_thread_pool pool(1);
   pool.schedule(count_up(cnt, l));
   pool.schedule(count_up(cnt, l));
-  std::this_thread::sleep_for(5ms);
+  std::this_thread::sleep_for(500ms);
   EXPECT_EQ(0, cnt.load());
   l.count_down();
   EXPECT_EQ(0, cnt.load());
   l.count_down();
   std::this_thread::sleep_for(5ms);
   EXPECT_EQ(2, cnt.load());
+}
+
+TEST(TimerTest, NoScheduler) {
+  using namespace std::chrono_literals;
+  std::vector<int64_t> tss;
+  auto waiting = [&](std::chrono::milliseconds ms) -> coro::task<> {
+    co_await coro::this_scheduler::sleep_for(ms);
+    int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    std::cout << "thread id is " << std::this_thread::get_id()
+              << ", timepoint is " << timestamp << '\n';
+    tss.push_back(timestamp);
+    co_return;
+  };
+  waiting(3ms).get();
+  waiting(5ms).get();
+  waiting(10ms).get();
+  ASSERT_EQ(3, tss.size());
+  EXPECT_LE(tss[0] + 4, tss[1]);
+  EXPECT_GE(tss[0] + 6, tss[1]);
+  EXPECT_LE(tss[1] + 9, tss[2]);
+  EXPECT_GE(tss[1] + 11, tss[2]);
+}
+
+TEST(TimerTest, WithScheduler) {
+  using namespace std::chrono_literals;
+  std::vector<int64_t> tss;
+  // tids.clear();
+  auto waiting = [&](std::chrono::milliseconds ms) -> coro::task<> {
+    co_await coro::this_scheduler::sleep_for(ms);
+    int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    co_await print_tid();
+    std::cout << "timepoint is " << timestamp << '\n';
+    tss.push_back(timestamp);
+    co_return;
+  };
+  coro::static_thread_pool pool(1);
+  auto w1 = pool.schedule(waiting(3ms));
+  auto w2 = pool.schedule(waiting(5ms));
+  auto w3 = pool.schedule(waiting(10ms));
+  w1.wait();
+  w2.wait();
+  w3.wait();
+  ASSERT_EQ(3, tss.size());
+  EXPECT_LE(tss[0] + 1, tss[1]);
+  EXPECT_GE(tss[0] + 3, tss[1]);
+  EXPECT_LE(tss[1] + 4, tss[2]);
+  EXPECT_GE(tss[1] + 6, tss[2]);
 }

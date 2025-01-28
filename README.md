@@ -1,10 +1,12 @@
 # cosched
 
-A simple c++20 coroutine scheduler with only single header.
+A simple c++20 header-only coroutine scheduler.
 
 Let's start from several examples.
 
-## Example: Recursive call
+# Example
+
+## Recursive call
 
 The following snippet shows a recursive coroutine which calculate fibonacci number in a most naive way.
 We can `co_await` a `task<Tp>` object and get its result. If the current coroutine is running in a scheduler,
@@ -27,7 +29,7 @@ int main() {
 }
 ```
 
-## Example: Run in parallel
+## Run in parallel
 
 With a scheduler we can run multiple coroutines simultaneously.
 The following snippet shows a task receives the results from two delayed subtasks.
@@ -54,3 +56,27 @@ int main() {
   resp.get(); // result is 3 
 }
 ```
+
+# Key Design
+
+In this chapter I will introduce how this tiny scheduler works in behind. It involves the core concepts of the c++20 coroutine.
+
+The coroutine is represented by the `task<>` object. A coroutine function should return `task<>` and contain `co_await` or `co_return` (`co_yield` is not supported).
+Assume we have a function `foo` with return type `Tp`, the first step that rewrite it in coroutine is to change the return type to `task<Tp>`.
+
+`task<Tp` is somehow very similar to the `std::future<Tp>`. We can use `get()` method to retrieve it result, which is a synchronized (and maybe blocking) call. But unlike
+`std::future`, coroutine also supports asynchronous invocation.
+Under a scheduler context (which means we are running coroutines in a scheduler), if we call another coroutine `bar` in coroutine `foo` by `co_await`ing it, then the scheduler
+could pause `foo` immediately and switch to `bar`. The `foo` will be resumed upon the completion of the `bar`. Once it is resumed, it will retrieve the return value of `bar` without blocking,
+and continues the following codes. It seems like a thread switching, except everything is happened in the user mode. And it is possible that both two coroutines are running in a same thread
+despite they are keeping switch in and switch out.
+
+```c++
+task<Tp> foo() {
+  // By calling `bar()` a new coroutine is created. co_await it will suspend the current coroutine until the new coroutine returns.
+  auto v = co_await bar(); // suspend before the co_await expression returns. When it is resumed, `v` will have the returned value from `bar`.
+  // continue running
+  co_return ...; // Finish this task. If this coroutine is also invoked by another coroutine, then the completion of `foo` will also lead another resumption.
+}
+```
+
