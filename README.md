@@ -57,11 +57,61 @@ int main() {
 }
 ```
 
+## Asynchronous timer
+
+In the previous example, we mocked a 1ms latency request by sleeping the whole thread. We also proved the asynchronous timer that won't block any thread. It must be used with a scheduler.
+The following snippet shows another mocking scenario that reading several files from the disk and merge theirs content. We use the async timer to mock the read file latency.
+We can read the files simultaneously even our scheduler has only one worker thread.
+```c++
+struct MockFileReader {
+  std::map<std::string, std::pair<int, std::string>> mock_confs;
+  void SetMock(const std::string& path, int delay_in_ms,
+                std::string content) {
+    mock_confs.emplace(
+        std::piecewise_construct, std::forward_as_tuple(path),
+        std::forward_as_tuple(delay_in_ms, std::move(content)));
+  }
+  coro::task<std::string> Read(std::string path) const {
+    auto it = mock_confs.find(path);
+    if (it == mock_confs.end()) {
+      throw std::runtime_error("not found");
+    }
+    co_await coro::this_scheduler::sleep_for(
+        std::chrono::milliseconds(it->second.first));
+    co_return it->second.second;
+  }
+};
+
+int main() {
+  MockFileReader r;
+  r.SetMock("/opt/tiger/a", 50, "content a,");
+  r.SetMock("/home/youtao/b", 60, "content b,");
+  r.SetMock("/usr/local/bin/c", 70, "content c");
+
+  auto process_file_task = [&]() -> coro::task<std::string> {
+    using namespace coro;
+    std::string file1, file2, file3, file4;
+    auto t1 = co_await this_scheduler::parallel(r.Read("/opt/tiger/a"));
+    auto t2 = co_await this_scheduler::parallel(r.Read("/home/youtao/b"));
+    auto t3 = co_await this_scheduler::parallel(r.Read("/usr/local/bin/c"));
+    try {
+      file1 = co_await std::move(t1);
+      file2 = co_await std::move(t2);
+      file3 = co_await std::move(t3);
+    } catch (const std::exception& e) {
+    }
+    co_return file1 + file2 + file3 + file4;
+  };
+  auto t = pool.schedule(process_file_task());
+  t.get(); // it will only take 70ms to complete the task.
+}
+```
+
 # Key Design
 
 In this chapter I will introduce how this tiny scheduler works in behind. It involves the core concepts of the c++20 coroutine.
 
-The coroutine is represented by the `task<>` object. A coroutine function should return `task<>` and contain `co_await` or `co_return` (`co_yield` is not supported).
+The coroutine is represented by the `task` object. A coroutine function should return `task` and contain `co_await` or `co_return` (`co_yield` is not supported).
 Assume we have a function `foo` with return type `Tp`, the first step that rewrite it in coroutine is to change the return type to `task<Tp>`.
 
 `task<Tp` is somehow very similar to the `std::future<Tp>`. We can use `get()` method to retrieve it result, which is a synchronized (and maybe blocking) call. But unlike
