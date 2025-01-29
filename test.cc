@@ -3,12 +3,17 @@
 #include <atomic>
 #include <chrono>
 #include <coroutine>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
 #include <ostream>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "cosched.hpp"
 
@@ -131,11 +136,117 @@ TEST(StaticThreadPoolTest, Latch) {
   coro::static_thread_pool pool(1);
   pool.schedule(count_up(cnt, l));
   pool.schedule(count_up(cnt, l));
-  std::this_thread::sleep_for(5ms);
+  std::this_thread::sleep_for(500ms);
   EXPECT_EQ(0, cnt.load());
   l.count_down();
   EXPECT_EQ(0, cnt.load());
   l.count_down();
   std::this_thread::sleep_for(5ms);
   EXPECT_EQ(2, cnt.load());
+}
+
+TEST(TimerTest, NoScheduler) {
+  using namespace std::chrono_literals;
+  std::vector<int64_t> tss;
+  auto waiting = [&](std::chrono::milliseconds ms) -> coro::task<> {
+    co_await coro::this_scheduler::sleep_for(ms);
+    int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    std::cout << "thread id is " << std::this_thread::get_id()
+              << ", timepoint is " << timestamp << '\n';
+    tss.push_back(timestamp);
+    co_return;
+  };
+  waiting(3ms).get();
+  waiting(5ms).get();
+  waiting(10ms).get();
+  ASSERT_EQ(3, tss.size());
+  EXPECT_LE(tss[0] + 4, tss[1]);
+  EXPECT_GE(tss[0] + 6, tss[1]);
+  EXPECT_LE(tss[1] + 9, tss[2]);
+  EXPECT_GE(tss[1] + 11, tss[2]);
+}
+
+TEST(TimerTest, WithScheduler) {
+  using namespace std::chrono_literals;
+  std::vector<int64_t> tss;
+  // tids.clear();
+  auto waiting = [&](std::chrono::milliseconds ms) -> coro::task<> {
+    co_await coro::this_scheduler::sleep_for(ms);
+    int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    co_await print_tid();
+    std::cout << "timepoint is " << timestamp << '\n';
+    tss.push_back(timestamp);
+    co_return;
+  };
+  coro::static_thread_pool pool(1);
+  auto w1 = pool.schedule(waiting(3ms));
+  auto w2 = pool.schedule(waiting(5ms));
+  auto w3 = pool.schedule(waiting(10ms));
+  w1.wait();
+  w2.wait();
+  w3.wait();
+  ASSERT_EQ(3, tss.size());
+  EXPECT_LE(tss[0] + 1, tss[1]);
+  EXPECT_GE(tss[0] + 3, tss[1]);
+  EXPECT_LE(tss[1] + 4, tss[2]);
+  EXPECT_GE(tss[1] + 6, tss[2]);
+}
+
+TEST(TimerTest, WithScheduler2) {
+  using namespace std::chrono_literals;
+
+  struct MockFileReader {
+    std::map<std::string, std::pair<int, std::string>> mock_confs;
+    void SetMock(const std::string& path, int delay_in_ms,
+                 std::string content) {
+      mock_confs.emplace(
+          std::piecewise_construct, std::forward_as_tuple(path),
+          std::forward_as_tuple(delay_in_ms, std::move(content)));
+    }
+    coro::task<std::string> Read(std::string path) const {
+      auto it = mock_confs.find(path);
+      if (it == mock_confs.end()) {
+        throw std::runtime_error("not found");
+      }
+      co_await coro::this_scheduler::sleep_for(
+          std::chrono::milliseconds(it->second.first));
+      co_return it->second.second;
+    }
+  };
+
+  MockFileReader r;
+  r.SetMock("/opt/tiger/a", 50, "content a,");
+  r.SetMock("/home/youtao/b", 60, "content b,");
+  r.SetMock("/usr/local/bin/c", 70, "content c");
+
+  auto process_file_task = [&]() -> coro::task<std::string> {
+    using namespace coro;
+    std::string file1, file2, file3, file4;
+    auto t1 = co_await this_scheduler::parallel(r.Read("/opt/tiger/a"));
+    auto t2 = co_await this_scheduler::parallel(r.Read("/home/youtao/b"));
+    auto t3 = co_await this_scheduler::parallel(r.Read("/usr/local/bin/c"));
+    auto t4 = co_await this_scheduler::parallel(r.Read("/dev/null"));
+    try {
+      file1 = co_await std::move(t1);
+      file2 = co_await std::move(t2);
+      file3 = co_await std::move(t3);
+      file4 = co_await std::move(t4);
+    } catch (const std::exception& e) {
+      std::cout << "there is a file that cannot be found\n";
+      EXPECT_STREQ("not found", e.what());
+    }
+    co_return file1 + file2 + file3 + file4;
+  };
+  coro::static_thread_pool pool(1);
+  auto start = std::chrono::steady_clock::now();
+  auto t = pool.schedule(process_file_task());
+  EXPECT_EQ("content a,content b,content c", t.get());
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  EXPECT_LE(69, elapsed.count());
+  EXPECT_GE(71, elapsed.count());
 }

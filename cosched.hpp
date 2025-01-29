@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <concepts>
 #include <condition_variable>
 #include <coroutine>
@@ -37,38 +38,47 @@ class always_awaiter : public std::suspend_always {
 };
 
 template <class Tp>
-  requires(!std::is_reference_v<Tp>)
-class task;
+requires(!std::is_reference_v<Tp>) class task;
 
+// A deferred task is a task without a scheduler. It is executed on the
+// time we get its result. The lifetime of the coroutine is bond with the
+// task object.
+// In contrast to the deferred task, an async task is a task can be executed in
+// a scheduler. The lifetime of the coroutine will be determined by the
+// scheduler. A deferred task can release its coroutine handle and transform
+// itself to an async task.
 enum class task_type {
   deferred,
   async,
 };
 
 class latch;
+class timer;
 
 namespace this_scheduler {
 inline always_awaiter yield;
+
+template <class Rep, class Period>
+timer sleep_for(const std::chrono::duration<Rep, Period>& rel);
 
 template <class Tp>
 parallel_awaiter<Tp> parallel(task<Tp>) noexcept;
 }  // namespace this_scheduler
 
 namespace details_ {
-
-struct cutex_wait_context {
+struct coro_mutex_context {
   static_thread_pool* scheduler{nullptr};
   std::deque<std::coroutine_handle<>> wait_ques;
   std::mutex mu;
 };
 
 template <class Pred>
-  requires requires(Pred f, std::coroutine_handle<> h) {
-    { f(h) } -> std::same_as<bool>;
-  }
+requires requires(Pred f, std::coroutine_handle<> h) {
+  { f(h) } -> std::same_as<bool>;
+}
 class condition_awaiter : public std::suspend_always {
  public:
-  explicit condition_awaiter(Pred f) : f_(f) {}
+  explicit condition_awaiter(Pred f) noexcept : f_(std::move(f)) {}
 
   bool await_suspend(std::coroutine_handle<> h) const { return f_(h); }
 
@@ -90,6 +100,7 @@ class promise_base : public std::promise<Tp> {
  public:
   struct shared_ctx_t {
     std::mutex mu;
+    //  When coro A calls coro B, coro A might be waiting until coro B finishs.
     std::coroutine_handle<> wait_coro;
     bool done{false};
     bool has_scheduled{false};
@@ -103,10 +114,11 @@ class promise_base : public std::promise<Tp> {
 
   inline final_awaiter<Tp> final_suspend() noexcept;
 
-  template <class Awaiter>
-  void await_transform(Awaiter) = delete;
+  template <class NotAllowedAwaiter>
+  void await_transform(NotAllowedAwaiter) = delete;
 
   inline auto await_transform(latch&) noexcept;
+  inline auto await_transform(const timer&) noexcept;
 
   always_awaiter await_transform(always_awaiter) noexcept {
     return always_awaiter{shared_ctx_->scheduler};
@@ -133,17 +145,58 @@ class promise_base : public std::promise<Tp> {
   template <class Up>
   friend struct final_awaiter;
 };
+
+class time_manager {
+ public:
+  using clock = std::chrono::steady_clock;
+  using time_point = clock::time_point;
+  using duration = clock::duration;
+
+  struct time_event {
+    time_point fire_time;
+    std::coroutine_handle<> event;
+  };
+
+  struct time_comparator {
+    bool operator()(const time_event& x, const time_event& y) const noexcept {
+      return x.fire_time > y.fire_time;
+    }
+  };
+
+  using time_que_t =
+      std::priority_queue<time_event, std::vector<time_event>, time_comparator>;
+
+  template <class Rep, class Period>
+  void add_timer(const std::chrono::duration<Rep, Period>& rel,
+                 std::coroutine_handle<> coro) {
+    time_point fire_time =
+        clock::now() + std::chrono::duration_cast<duration>(rel);
+    time_que_.push({fire_time, coro});
+  }
+
+  bool get_closest_timer(time_event* e) const {
+    if (time_que_.empty()) return false;
+    *e = time_que_.top();
+    return true;
+  }
+
+  void remove_closest_timer() {
+    if (!time_que_.empty()) time_que_.pop();
+  }
+
+ private:
+  time_que_t time_que_;
+};
 }  // namespace details_
 
 template <class Tp>
-  requires(!std::is_reference_v<Tp>)
-class promise : public details_::promise_base<Tp> {
+requires(!std::is_reference_v<Tp>) class promise
+    : public details_::promise_base<Tp> {
  public:
   template <class Up>
-  void return_value(Up&& value)
-    requires(std::is_same_v<Tp, Up> || std::is_same_v<const Tp&, Up> ||
-             std::is_constructible_v<Tp, Up>)
-  {
+  void return_value(Up&& value) requires(std::is_same_v<Tp, Up> ||
+                                         std::is_same_v<const Tp&, Up> ||
+                                         std::is_constructible_v<Tp, Up>) {
     this->set_value(std::forward<Up>(value));
   }
 
@@ -155,8 +208,7 @@ class promise : public details_::promise_base<Tp> {
   friend class async_awaiter;
 
   template <class Up>
-    requires(!std::is_reference_v<Up>)
-  friend struct synced_waker;
+  requires(!std::is_reference_v<Up>) friend struct synced_waker;
 
   friend class static_thread_pool;
 };
@@ -212,7 +264,7 @@ class task_base {
     }
   }
 
-  template <typename Rep, typename Period>
+  template <class Rep, class Period>
   std::future_status wait_for(
       const std::chrono::duration<Rep, Period>& rel) const {
     if (typ_ == task_type::deferred) {
@@ -225,7 +277,7 @@ class task_base {
     wait();
     if constexpr (std::is_same_v<Tp, void>) {
       fu_.get();
-      // Handle of the non-async task should be destroyed here.
+      // non-async task handle should be destroyed here.
       if (typ_ == task_type::deferred) {
         handle_.destroy();
       }
@@ -284,8 +336,7 @@ class task_base {
 }  // namespace details_
 
 template <class Tp = void>
-  requires(!std::is_reference_v<Tp>)
-class task : public details_::task_base<Tp> {
+requires(!std::is_reference_v<Tp>) class task : public details_::task_base<Tp> {
  public:
   using promise_type = promise<Tp>;
 
@@ -351,6 +402,7 @@ class static_thread_pool {
   friend struct details_::final_awaiter;
 
   friend class latch;
+  friend class timer;
 
   template <class Tp>
   void schedule(std::coroutine_handle<Tp> handle) {
@@ -365,23 +417,49 @@ class static_thread_pool {
     con_.notify_one();
   }
 
+  template <class Rep, class Peroid>
+  void schedule_timer(std::coroutine_handle<> handle,
+                      const std::chrono::duration<Rep, Peroid>& rel) {
+    {
+      std::unique_lock l(mu_);
+      time_man_.add_timer(rel, handle);
+    }
+    con_.notify_one();
+  }
+
   void worker_routine() {
     while (true) {
       std::coroutine_handle<> t;
+      details_::time_manager::time_event ev;
       {
         std::unique_lock l(mu_);
-        con_.wait(l, [&] { return exit_ || !que_.empty(); });
-        if (que_.empty() && exit_) {
+        if (time_man_.get_closest_timer(&ev)) {
+          if (details_::time_manager::clock::now() >= ev.fire_time) {
+            time_man_.remove_closest_timer();
+            l.unlock();
+            ev.event.resume();
+            continue;
+          }
+          con_.wait_until(l, ev.fire_time,
+                          [&] { return exit_ || !que_.empty(); });
+        } else {
+          con_.wait(l, [&] { return exit_ || !que_.empty(); });
+        }
+        if (que_.empty() && !time_man_.get_closest_timer(&ev) && exit_) {
           break;
         }
-        t = std::move(que_.front());
-        que_.pop();
+        if (!que_.empty()) {
+          t = que_.front();
+          que_.pop();
+          l.unlock();
+          t.resume();
+        }
       }
-      t.resume();
     }
   }
 
   std::queue<std::coroutine_handle<>> que_;
+  details_::time_manager time_man_;
   std::mutex mu_;
   std::condition_variable con_;
   std::vector<std::thread> ths_;
@@ -408,7 +486,7 @@ class async_awaiter : protected coro::task<Tp> {
   bool await_suspend(std::coroutine_handle<> h) {
     // The callee might resume caller in the future, and result in destruction
     // of the caller frame. Which means the awaiter will be destructed too.
-    // Therefore, we cannot use `this` next.
+    // Therefore, we cannot use `this` later.
     return maybe_suspend(suspend_, this->shared_ctx_, this->handle_, h);
   }
 
@@ -462,7 +540,7 @@ class parallel_awaiter : public async_awaiter<Tp> {
   friend parallel_awaiter<Up> this_scheduler::parallel(task<Up>) noexcept;
 
   explicit parallel_awaiter(task<Tp> t) noexcept
-      : async_awaiter<Tp>(std::move(t), false /*not suspend*/) {}
+      : async_awaiter<Tp>(std::move(t), false /*no suspend*/) {}
 };
 
 template <class Tp>
@@ -528,12 +606,50 @@ class latch {
   }
 
   std::atomic<ptrdiff_t> countdown_;
-  details_::cutex_wait_context wait_ctx_;
+  details_::coro_mutex_context wait_ctx_;
 };
+
+class timer {
+ public:
+  using duration = details_::time_manager::duration;
+
+  template <class Rep, class Period>
+  explicit timer(const std::chrono::duration<Rep, Period>& rel) : t_(rel) {}
+  timer(const timer&) = default;
+  timer& operator=(const timer&) = default;
+
+ private:
+  template <class Tp>
+  friend class details_::promise_base;
+
+  auto wait_this(static_thread_pool* scheduler) const {
+    return [scheduler, this](std::coroutine_handle<> h) -> bool {
+      if (!scheduler) {
+        std::this_thread::sleep_for(t_);
+        return false;
+      }
+      scheduler->schedule_timer(h, t_);
+      return true;
+    };
+  }
+
+  duration t_;
+};
+
+template <class Rep, class Period>
+timer this_scheduler::sleep_for(const std::chrono::duration<Rep, Period>& rel) {
+  return timer(rel);
+}
 
 template <class Tp>
 inline auto details_::promise_base<Tp>::await_transform(latch& l) noexcept {
   return condition_awaiter(l.wait_this(shared_ctx_->scheduler));
+}
+
+template <class Tp>
+inline auto details_::promise_base<Tp>::await_transform(
+    const timer& t) noexcept {
+  return condition_awaiter(t.wait_this(shared_ctx_->scheduler));
 }
 
 template <class Tp>
