@@ -105,6 +105,7 @@ int main() {
     }
     co_return file1 + file2 + file3 + file4;
   };
+  coro::static_thread_pool pool(1);
   auto t = pool.schedule(process_file_task());
   t.get(); // it will only take 70ms to complete the task.
 }
