@@ -123,10 +123,29 @@ despite they are keeping switch in and switch out.
 
 ```c++
 task<Tp> foo() {
-  // By calling `bar()` a new coroutine is created. co_await it will suspend the current coroutine until the new coroutine returns.
-  auto v = co_await bar(); // suspend before the co_await expression returns. When it is resumed, `v` will have the returned value from `bar`.
+  // By calling `bar()` a new coroutine is created.
+  // co_await it will suspend the current coroutine until the new coroutine returns.
+  auto v = co_await bar(); // Suspend before the co_await expression returns.
+                           // When it is resumed, `v` will have the returned value from `bar`.
   // continue running
-  co_return ...; // Finish this task. If this coroutine is also invoked by another coroutine, then the completion of `foo` will also lead another resumption.
+  co_return ...; // Finish this task.
+                 // If this coroutine is also invoked by another coroutine,
+                 // then the completion of `foo` will also lead another resumption.
 }
 ```
 
+A `task` has two different types: it is either `deferred` or `async`. This is also very similar to the `std::launch`:
+a deferred task is a lazy-evaulation function, it won't run untill we try to get its result. On the other hand, an async task is a task that can be executed by a scheduler in the background.
+
+`static_thread_pool` is our coroutine scheduler. Just as its name describes, it's a simple thread pool that not much different than other thread pool implementations.
+A `static_thread_pool` object is always associated with a time manager. The time manager manages the timer tasks (e.g., `this_scheduler::sleep_for`).
+It is implemented by a priority queue which always returns the task with the smallest timestamp.
+
+**Awaiter** specifies the behaviour of how the scheduler switches coroutines. There are five different kind of awaiters in cosched. They are
+- `always_awaiter` Always suspends the current coroutine and puts it to the end of the scheduler's task queue.
+- `async_awaiter` is the most common awaiter. It appears when we invoke another coroutine (i.e., the callee) from the current coroutine (i.e., the caller).
+  It won't suspend if the callee has finished (which means we can retrieve its result immediately), otherwise, it will suspend the caller and make it as the callee's "wait coroutine".
+  Once a coroutine is finished, its `wait coroutine` will be back to the scheduler.
+- `parallel_awaiter` is similar to the `async_awaiter`, but it never suspend the current coroutine. If the scheduler has two or more worker threads, these two coroutines can run in parallel.
+- `final_awaiter` is the awaiter which returned by `final_suspend()` of the promise object. It retrieves the coroutine's "wait coroutine" and puts it back to the scheduler's task que.
+- `condition_awaiter` is a class template. Its behaviour can be customized. Our timer, latch, and mutex all utilize it.
