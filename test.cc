@@ -5,6 +5,7 @@
 #include <coroutine>
 #include <cstdint>
 #include <iostream>
+#include <latch>
 #include <mutex>
 #include <ostream>
 #include <set>
@@ -126,8 +127,9 @@ TEST(StaticThreadPoolTest, Yield) {
 TEST(StaticThreadPoolTest, Latch) {
   using namespace std::chrono_literals;
   std::atomic<int> cnt{0};
-  coro::latch l(2);
-  auto count_up = [](std::atomic<int>& cnt, coro::latch& l) -> coro::task<> {
+  coro::async_latch l(2);
+  auto count_up = [](std::atomic<int>& cnt,
+                     coro::async_latch& l) -> coro::task<> {
     co_await l;
     cnt.fetch_add(1);
     co_return;
@@ -249,4 +251,40 @@ TEST(TimerTest, WithScheduler2) {
       std::chrono::steady_clock::now() - start);
   EXPECT_LE(69, elapsed.count());
   EXPECT_GE(71, elapsed.count());
+}
+
+TEST(MutexTest, Basic) {
+  using namespace std::chrono_literals;
+  coro::static_thread_pool scheduler(3);
+  std::vector<int> v;
+  std::latch l(5);
+  coro::async_mutex mu;
+
+  auto delayed_task = [&l]() -> coro::task<> {
+    co_await coro::this_scheduler::sleep_for(100ms);
+    l.count_down();
+  };
+  auto push_task = [&]() -> coro::task<> {
+    co_await mu.lock();
+    std::cout << "push back task begin, timestamp="
+              << std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now().time_since_epoch())
+                     .count()
+              << '\n';
+    v.push_back(v.size());
+    co_await coro::this_scheduler::sleep_for(10ms);
+    mu.unlock();
+  };
+
+  auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < 5; i++) {
+    scheduler.schedule(delayed_task());
+    scheduler.schedule(push_task());
+  }
+  l.wait();
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  EXPECT_EQ(5, v.size());
+  EXPECT_LE(99, elapsed.count());
+  EXPECT_GE(101, elapsed.count());
 }
