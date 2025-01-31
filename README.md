@@ -110,7 +110,7 @@ int main() {
 }
 ```
 
-## Async mutex
+## Coroutine mutex
 
 Cosched supports coroutine mutex lock. Unlike a normal mutex, which blocks threads, the coroutine mutex only blocks the coroutines, allowing the worker thread to continue executing other tasks.
 ```c++
