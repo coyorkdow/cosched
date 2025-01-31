@@ -5,6 +5,8 @@ A simple c++20 header-only coroutine scheduler that supports parallel task, time
 It is not intend for a high performance coroutine framework that can be used in a real production environment.
 My goal is to implement all basic functions using the fewest possible lines of code.
 
+To use cosched, just copy `cosched.hpp` and put it into your project.
+
 # Example
 
 ## Recursive call
