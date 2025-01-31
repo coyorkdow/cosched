@@ -1,11 +1,11 @@
 #pragma once
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <concepts>
 #include <condition_variable>
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -52,8 +52,10 @@ enum class task_type {
   async,
 };
 
-class latch;
+class async_latch;
 class timer;
+class async_mutex;
+class async_lock;
 
 namespace this_scheduler {
 inline always_awaiter yield;
@@ -72,22 +74,47 @@ struct coro_mutex_context {
   std::mutex mu;
 };
 
-template <class Pred>
+struct mono {
+  void operator()() const noexcept {}
+};
+
+template <class Pred, class RetFn = mono>
 requires requires(Pred f, std::coroutine_handle<> h) {
   { f(h) } -> std::same_as<bool>;
 }
 class condition_awaiter : public std::suspend_always {
  public:
-  explicit condition_awaiter(Pred f) noexcept : f_(std::move(f)) {}
+  explicit condition_awaiter(Pred f, RetFn r = {}) noexcept
+      : f_(std::move(f)), r_(std::move(r)) {}
 
   bool await_suspend(std::coroutine_handle<> h) const { return f_(h); }
 
+  std::invoke_result_t<RetFn> await_resume() {
+    if constexpr (!std::is_same_v<void, std::invoke_result_t<RetFn>>) {
+      return r_();
+    }
+  }
+
  private:
   Pred f_;
+  RetFn r_;
 };
 
 template <class Tp>
 condition_awaiter(Tp) -> condition_awaiter<Tp>;
+
+template <class Tp, class Rp>
+condition_awaiter(Tp, Rp) -> condition_awaiter<Tp, Rp>;
+
+template <class Tp>
+struct enable_condition_awaiter_transform : std::false_type {};
+
+template <class RetFn = mono>
+struct async_lock_token {
+  inline auto wait_this(static_thread_pool*);
+  async_mutex* mu;
+  RetFn ret;
+};
 
 template <class Tp>
 struct final_awaiter;
@@ -114,11 +141,17 @@ class promise_base : public std::promise<Tp> {
 
   inline final_awaiter<Tp> final_suspend() noexcept;
 
-  template <class NotAllowedAwaiter>
-  void await_transform(NotAllowedAwaiter) = delete;
+  template <class Up>
+  requires enable_condition_awaiter_transform<Up>::value auto await_transform(
+      Up&& u) noexcept {
+    return condition_awaiter(u.wait_this(shared_ctx_->scheduler));
+  }
 
-  inline auto await_transform(latch&) noexcept;
-  inline auto await_transform(const timer&) noexcept;
+  template <class Rp>
+  auto await_transform(async_lock_token<Rp> att) noexcept {
+    return condition_awaiter(att.wait_this(shared_ctx_->scheduler),
+                             std::move(att.ret));
+  }
 
   always_awaiter await_transform(always_awaiter) noexcept {
     return always_awaiter{shared_ctx_->scheduler};
@@ -401,8 +434,9 @@ class static_thread_pool {
   template <class Tp>
   friend struct details_::final_awaiter;
 
-  friend class latch;
+  friend class async_latch;
   friend class timer;
+  friend class async_mutex;
 
   template <class Tp>
   void schedule(std::coroutine_handle<Tp> handle) {
@@ -572,11 +606,128 @@ details_::promise_base<Tp>::final_suspend() noexcept {
   return {this};
 }
 
-class latch {
+class async_mutex {
+  static constexpr uint64_t kMuLocked = 0x1;
+  static constexpr uint64_t kMuWait = 0x2;
+
  public:
-  explicit latch(std::ptrdiff_t countdown) : countdown_(countdown) {}
-  latch(const latch&) = delete;
-  latch& operator=(const latch&) = delete;
+  async_mutex() : state_(0) {}
+  async_mutex(const async_mutex&) = delete;
+  async_mutex& operator=(const async_mutex&) = delete;
+
+  details_::async_lock_token<> lock() { return {this}; }
+
+  void unlock() {
+    uint64_t s = state_.load(std::memory_order_relaxed);
+    if ((s & kMuWait) || !state_.compare_exchange_strong(s, s & ~kMuLocked)) {
+      unlock_slow();
+    }
+  }
+
+ private:
+  template <class Rp>
+  friend struct details_::async_lock_token;
+
+  auto wait_this(static_thread_pool* scheduler) {
+    return [scheduler, this](std::coroutine_handle<> this_coroutine) -> bool {
+      uint64_t s = state_.load(std::memory_order_relaxed);
+      if ((s & (kMuLocked | kMuWait)) ||
+          !state_.compare_exchange_strong(s, s | kMuLocked,
+                                          std::memory_order_acq_rel)) {
+        return lock_slow(scheduler, this_coroutine);
+      }
+      return false;
+    };
+  }
+
+  bool lock_slow(static_thread_pool* scheduler,
+                 std::coroutine_handle<> this_coroutine) {
+    std::unique_lock l(wait_ctx_.mu);
+    state_.fetch_or(kMuWait, std::memory_order_relaxed);
+    uint64_t s = state_.load(std::memory_order_relaxed);
+    if (!(s & kMuLocked)) {
+      state_.store((s | kMuLocked) & ~kMuWait, std::memory_order_relaxed);
+      return false;
+    }
+    wait_ctx_.scheduler = scheduler;
+    wait_ctx_.wait_ques.push_back(this_coroutine);
+    return true;
+  }
+
+  void unlock_slow() {
+    std::unique_lock l(wait_ctx_.mu);
+    uint64_t s = state_.load(std::memory_order_relaxed);
+    if (wait_ctx_.wait_ques.empty()) {
+      state_.store(s & ~kMuLocked, std::memory_order_relaxed);
+      return;
+    }
+    auto h = wait_ctx_.wait_ques.front();
+    wait_ctx_.wait_ques.pop_front();
+    wait_ctx_.scheduler->schedule(h);
+  }
+
+  std::atomic<uint64_t> state_;
+  details_::coro_mutex_context wait_ctx_;
+};
+
+template <class RetFn>
+auto details_::async_lock_token<RetFn>::wait_this(
+    static_thread_pool* scheduler) {
+  return mu->wait_this(scheduler);
+}
+
+class async_lock {
+ public:
+  static auto make_lock(async_mutex& mu) {
+    auto create_lock = [mu = &mu] { return async_lock(*mu); };
+    return details_::async_lock_token<decltype(create_lock)>(
+        &mu, std::move(create_lock));
+  }
+
+  async_lock(async_mutex& mu, std::defer_lock_t) noexcept
+      : mu_(&mu), owns_(false) {}
+
+  async_lock(async_mutex& mu, std::adopt_lock_t) noexcept
+      : mu_(&mu), owns_(true) {}
+
+  details_::async_lock_token<> lock() {
+    owns_ = true;
+    return {mu_};
+  }
+
+  async_lock(async_lock&& r) noexcept { *this = std::move(r); }
+
+  async_lock& operator=(async_lock&& r) noexcept {
+    mu_ = r.mu_;
+    owns_ = r.owns_;
+    r.mu_ = nullptr;
+    r.owns_ = false;
+    return *this;
+  }
+
+  void unlock() {
+    mu_->unlock();
+    owns_ = false;
+  }
+
+  bool owns_lock() const noexcept { return owns_; }
+
+  ~async_lock() {
+    if (owns_ && mu_) mu_->unlock();
+  }
+
+ private:
+  async_lock(async_mutex& mu) : mu_(&mu), owns_(true) {}
+
+  async_mutex* mu_;
+  bool owns_;
+};
+
+class async_latch {
+ public:
+  explicit async_latch(std::ptrdiff_t countdown) : countdown_(countdown) {}
+  async_latch(const async_latch&) = delete;
+  async_latch& operator=(const async_latch&) = delete;
 
   void count_down(std::ptrdiff_t n = 1) {
     auto before = countdown_.fetch_sub(n, std::memory_order_acq_rel);
@@ -594,13 +745,13 @@ class latch {
   friend class details_::promise_base;
 
   auto wait_this(static_thread_pool* scheduler) {
-    return [scheduler, this](std::coroutine_handle<> h) -> bool {
+    return [scheduler, this](std::coroutine_handle<> this_coroutine) -> bool {
       std::unique_lock l(wait_ctx_.mu);
       if (countdown_.load(std::memory_order_acquire) <= 0) {
         return false;
       }
       wait_ctx_.scheduler = scheduler;
-      wait_ctx_.wait_ques.push_back(h);
+      wait_ctx_.wait_ques.push_back(this_coroutine);
       return true;
     };
   }
@@ -608,6 +759,11 @@ class latch {
   std::atomic<ptrdiff_t> countdown_;
   details_::coro_mutex_context wait_ctx_;
 };
+
+namespace details_ {
+template <>
+struct enable_condition_awaiter_transform<async_latch&> : std::true_type {};
+}  // namespace details_
 
 class timer {
  public:
@@ -623,12 +779,12 @@ class timer {
   friend class details_::promise_base;
 
   auto wait_this(static_thread_pool* scheduler) const {
-    return [scheduler, this](std::coroutine_handle<> h) -> bool {
+    return [scheduler, this](std::coroutine_handle<> this_coroutine) -> bool {
       if (!scheduler) {
         std::this_thread::sleep_for(t_);
         return false;
       }
-      scheduler->schedule_timer(h, t_);
+      scheduler->schedule_timer(this_coroutine, t_);
       return true;
     };
   }
@@ -636,20 +792,14 @@ class timer {
   duration t_;
 };
 
+namespace details_ {
+template <>
+struct enable_condition_awaiter_transform<timer> : std::true_type {};
+}  // namespace details_
+
 template <class Rep, class Period>
 timer this_scheduler::sleep_for(const std::chrono::duration<Rep, Period>& rel) {
   return timer(rel);
-}
-
-template <class Tp>
-inline auto details_::promise_base<Tp>::await_transform(latch& l) noexcept {
-  return condition_awaiter(l.wait_this(shared_ctx_->scheduler));
-}
-
-template <class Tp>
-inline auto details_::promise_base<Tp>::await_transform(
-    const timer& t) noexcept {
-  return condition_awaiter(t.wait_this(shared_ctx_->scheduler));
 }
 
 template <class Tp>
