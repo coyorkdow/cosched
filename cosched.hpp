@@ -74,25 +74,47 @@ struct coro_mutex_context {
   std::mutex mu;
 };
 
-template <class Pred>
+struct mono {
+  void operator()() const noexcept {}
+};
+
+template <class Pred, class RetFn = mono>
 requires requires(Pred f, std::coroutine_handle<> h) {
   { f(h) } -> std::same_as<bool>;
 }
 class condition_awaiter : public std::suspend_always {
  public:
-  explicit condition_awaiter(Pred f) noexcept : f_(std::move(f)) {}
+  explicit condition_awaiter(Pred f, RetFn r = {}) noexcept
+      : f_(std::move(f)), r_(std::move(r)) {}
 
   bool await_suspend(std::coroutine_handle<> h) const { return f_(h); }
 
+  std::invoke_result_t<RetFn> await_resume() {
+    if constexpr (!std::is_same_v<void, std::invoke_result_t<RetFn>>) {
+      return r_();
+    }
+  }
+
  private:
   Pred f_;
+  RetFn r_;
 };
 
 template <class Tp>
 condition_awaiter(Tp) -> condition_awaiter<Tp>;
 
+template <class Tp, class Rp>
+condition_awaiter(Tp, Rp) -> condition_awaiter<Tp, Rp>;
+
 template <class Tp>
 struct enable_condition_awaiter_transform : std::false_type {};
+
+template <class RetFn = mono>
+struct async_lock_token {
+  inline auto wait_this(static_thread_pool*);
+  async_mutex* mu;
+  RetFn ret;
+};
 
 template <class Tp>
 struct final_awaiter;
@@ -123,6 +145,12 @@ class promise_base : public std::promise<Tp> {
   requires enable_condition_awaiter_transform<Up>::value auto await_transform(
       Up&& u) noexcept {
     return condition_awaiter(u.wait_this(shared_ctx_->scheduler));
+  }
+
+  template <class Rp>
+  auto await_transform(async_lock_token<Rp> att) noexcept {
+    return condition_awaiter(att.wait_this(shared_ctx_->scheduler),
+                             std::move(att.ret));
   }
 
   always_awaiter await_transform(always_awaiter) noexcept {
@@ -578,22 +606,16 @@ details_::promise_base<Tp>::final_suspend() noexcept {
   return {this};
 }
 
-namespace details_ {
-struct async_lock_token {
-  inline auto wait_this(static_thread_pool*);
-  async_mutex* mu;
-};
-
-template <>
-struct enable_condition_awaiter_transform<async_lock_token> : std::true_type {};
-}  // namespace details_
-
 class async_mutex {
   static constexpr uint64_t kMuLocked = 0x1;
   static constexpr uint64_t kMuWait = 0x2;
 
  public:
-  details_::async_lock_token lock() { return {this}; }
+  async_mutex() : state_(0) {}
+  async_mutex(const async_mutex&) = delete;
+  async_mutex& operator=(const async_mutex&) = delete;
+
+  details_::async_lock_token<> lock() { return {this}; }
 
   void unlock() {
     uint64_t s = state_.load(std::memory_order_relaxed);
@@ -603,8 +625,8 @@ class async_mutex {
   }
 
  private:
+  template <class Rp>
   friend struct details_::async_lock_token;
-  friend class async_lock;
 
   auto wait_this(static_thread_pool* scheduler) {
     return [scheduler, this](std::coroutine_handle<> this_coroutine) -> bool {
@@ -648,9 +670,58 @@ class async_mutex {
   details_::coro_mutex_context wait_ctx_;
 };
 
-auto details_::async_lock_token::wait_this(static_thread_pool* scheduler) {
+template <class RetFn>
+auto details_::async_lock_token<RetFn>::wait_this(
+    static_thread_pool* scheduler) {
   return mu->wait_this(scheduler);
 }
+
+class async_lock {
+ public:
+  static auto make_lock(async_mutex& mu) {
+    auto create_lock = [mu = &mu] { return async_lock(*mu); };
+    return details_::async_lock_token<decltype(create_lock)>(
+        &mu, std::move(create_lock));
+  }
+
+  async_lock(async_mutex& mu, std::defer_lock_t) noexcept
+      : mu_(&mu), owns_(false) {}
+
+  async_lock(async_mutex& mu, std::adopt_lock_t) noexcept
+      : mu_(&mu), owns_(true) {}
+
+  details_::async_lock_token<> lock() {
+    owns_ = true;
+    return {mu_};
+  }
+
+  async_lock(async_lock&& r) noexcept { *this = std::move(r); }
+
+  async_lock& operator=(async_lock&& r) noexcept {
+    mu_ = r.mu_;
+    owns_ = r.owns_;
+    r.mu_ = nullptr;
+    r.owns_ = false;
+    return *this;
+  }
+
+  void unlock() {
+    mu_->unlock();
+    owns_ = false;
+  }
+
+  bool owns_lock() const noexcept { return owns_; }
+
+  ~async_lock() {
+    if (owns_ && mu_) mu_->unlock();
+  }
+
+ private:
+  async_lock(async_mutex& mu) : mu_(&mu), owns_(true) {}
+
+  async_mutex* mu_;
+  bool owns_;
+};
 
 class async_latch {
  public:

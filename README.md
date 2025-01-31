@@ -1,8 +1,9 @@
 # cosched
 
-A simple c++20 header-only coroutine scheduler.
+A simple c++20 header-only coroutine scheduler that supports parallel task, timer, latch, and mutex.
 
-Let's start from several examples.
+It is not intend for a high performance coroutine framework that can be used in a real production environment.
+My goal is to implement all basic functions using the fewest possible lines of code.
 
 # Example
 
@@ -105,6 +106,27 @@ int main() {
   auto t = pool.schedule(process_file_task());
   t.get(); // it will only take 70ms to complete the task.
 }
+```
+
+## Async mutex
+
+Cosched supports coroutine mutex lock. Unlike a normal mutex, which blocks threads, the coroutine mutex only blocks the coroutines, allowing the worker thread to continue executing other tasks.
+```c++
+std::vector<int> v;
+coro::async_mutex mu;
+
+auto push_task = [&]() -> coro::task<> {
+  // create a lock guard type (same as the std::unique_lock).
+  coro::async_lock l = co_await coro::async_lock::make_lock(mu);
+  assert(l.owns_lock());
+  std::cout << "push back task begin, timestamp="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count()
+            << '\n';
+  v.push_back(v.size());
+  co_await coro::this_scheduler::sleep_for(10ms);
+};
 ```
 
 # Key Design

@@ -265,7 +265,9 @@ TEST(MutexTest, Basic) {
     l.count_down();
   };
   auto push_task = [&]() -> coro::task<> {
-    co_await mu.lock();
+    // co_await mu.lock();
+    coro::async_lock l = co_await coro::async_lock::make_lock(mu);
+    EXPECT_TRUE(l.owns_lock());
     std::cout << "push back task begin, timestamp="
               << std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now().time_since_epoch())
@@ -273,7 +275,7 @@ TEST(MutexTest, Basic) {
               << '\n';
     v.push_back(v.size());
     co_await coro::this_scheduler::sleep_for(10ms);
-    mu.unlock();
+    // mu.unlock();
   };
 
   auto start = std::chrono::steady_clock::now();
