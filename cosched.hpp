@@ -619,7 +619,8 @@ class async_mutex {
 
   void unlock() {
     uint64_t s = state_.load(std::memory_order_relaxed);
-    if ((s & kMuWait) || !state_.compare_exchange_strong(s, s & ~kMuLocked)) {
+    if ((s & kMuWait) || !state_.compare_exchange_strong(
+                             s, s & ~kMuLocked, std::memory_order_acq_rel)) {
       unlock_slow();
     }
   }
@@ -643,8 +644,7 @@ class async_mutex {
   bool lock_slow(static_thread_pool* scheduler,
                  std::coroutine_handle<> this_coroutine) {
     std::unique_lock l(wait_ctx_.mu);
-    state_.fetch_or(kMuWait, std::memory_order_relaxed);
-    uint64_t s = state_.load(std::memory_order_relaxed);
+    uint64_t s = state_.fetch_or(kMuWait, std::memory_order_acq_rel);
     if (!(s & kMuLocked)) {
       state_.store((s | kMuLocked) & ~kMuWait, std::memory_order_relaxed);
       return false;
