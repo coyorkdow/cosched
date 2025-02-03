@@ -680,8 +680,8 @@ class async_lock {
  public:
   static auto make_lock(async_mutex& mu) {
     auto create_lock = [mu = &mu] { return async_lock(*mu); };
-    return details_::async_lock_token<decltype(create_lock)>(
-        &mu, std::move(create_lock));
+    return details_::async_lock_token<decltype(create_lock)>{
+        &mu, std::move(create_lock)};
   }
 
   async_lock(async_mutex& mu, std::defer_lock_t) noexcept
