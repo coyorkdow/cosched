@@ -78,13 +78,14 @@ TEST(CoroRunTest, Async) {
     co_return;
   }(f.release_coroutine_handle());
 
-  std::jthread th([f = std::move(f)]() mutable {
+  std::thread th([f = std::move(f)]() mutable {
     // std::cout << f.get();
     EXPECT_EQ("abc", f.get());
     std::cout << "sub thread exit\n";
   });
 
   b.get();
+  th.join();
 }
 
 TEST(StaticThreadPoolTest, Fib) {
