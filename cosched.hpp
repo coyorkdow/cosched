@@ -308,17 +308,14 @@ class task_base {
 
   Tp get() {
     wait();
+    // non-async task handle should be destroyed here.
+    if (typ_ == task_type::deferred) {
+      handle_.destroy();
+    }
     if constexpr (std::is_same_v<Tp, void>) {
       fu_.get();
-      // non-async task handle should be destroyed here.
-      if (typ_ == task_type::deferred) {
-        handle_.destroy();
-      }
     } else {
       Tp res = fu_.get();
-      if (typ_ == task_type::deferred) {
-        handle_.destroy();
-      }
       return res;
     }
   }
