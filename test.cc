@@ -88,6 +88,37 @@ TEST(CoroRunTest, Async) {
   th.join();
 }
 
+TEST(CoroRunTest, DeferredTaskExceptionLeaksFrame) {
+  std::atomic<int> dtor_count{0};
+  struct Guard {
+    std::atomic<int>& count;
+    bool moved_flag = false;
+    Guard(std::atomic<int>& count) : count(count) {}
+    Guard(Guard&& other) noexcept : count(other.count) {
+      other.moved_flag = true;
+    }
+    ~Guard() {
+      if (!moved_flag) {
+        count.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  };
+  auto throwing_task = [&](Guard g) -> coro::task<void> {
+    throw std::runtime_error("boom");
+    co_return;
+  };
+
+  auto t = throwing_task(Guard{dtor_count});
+  try {
+    t.get();
+    FAIL() << "expected exception";
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ("boom", e.what());
+  }
+
+  EXPECT_EQ(1, dtor_count.load(std::memory_order_relaxed));
+}
+
 TEST(StaticThreadPoolTest, Fib) {
   coro::static_thread_pool pool(3);
   tids.clear();
