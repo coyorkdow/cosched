@@ -348,6 +348,13 @@ class task_base {
   task_base(task_base&& rhs) noexcept { *this = std::move(rhs); }
 
   task_base& operator=(task_base&& rhs) noexcept {
+    if (this == &rhs) {
+      return *this;
+    }
+    // Release currently owned deferred coroutine frame before overwriting.
+    if (typ_ == task_type::deferred && fu_.valid()) {
+      handle_.destroy();
+    }
     handle_ = rhs.handle_;
     fu_ = std::move(rhs.fu_);
     shared_ctx_ = std::move(rhs.shared_ctx_);

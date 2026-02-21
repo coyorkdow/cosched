@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <latch>
+#include <memory>
 #include <mutex>
 #include <ostream>
 #include <set>
@@ -117,6 +118,38 @@ TEST(CoroRunTest, DeferredTaskExceptionLeaksFrame) {
   }
 
   EXPECT_EQ(1, dtor_count.load(std::memory_order_relaxed));
+}
+
+TEST(CoroRunTest, MoveAssignShouldDestroyOldDeferredFrame) {
+  int finished_tasks = 0;
+  auto make_tagged_task = [&](std::shared_ptr<int> tag) -> coro::task<void> {
+    finished_tasks++;
+    co_return;
+  };
+
+  auto tag1 = std::make_shared<int>(1);
+  auto tag2 = std::make_shared<int>(2);
+  std::weak_ptr<int> w1 = tag1;
+  std::weak_ptr<int> w2 = tag2;
+
+  auto t1 = make_tagged_task(tag1);
+  auto t2 = make_tagged_task(tag2);
+
+  // Drop external ownership: each tag should now be owned only by coroutine
+  // frame state.
+  tag1.reset();
+  tag2.reset();
+  ASSERT_FALSE(w1.expired());
+  ASSERT_FALSE(w2.expired());
+
+  // If move assignment handles the old frame correctly, t1's previous frame
+  // should be destroyed here.
+  t1 = std::move(t2);
+  t1.get();
+
+  EXPECT_TRUE(w2.expired());
+  EXPECT_TRUE(w1.expired());
+  EXPECT_EQ(1, finished_tasks);
 }
 
 TEST(StaticThreadPoolTest, Fib) {
